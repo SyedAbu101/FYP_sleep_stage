@@ -1,15 +1,16 @@
-# Sleep Stage Classification from Wearable IMU Sensors
+# Sleep Stage Classification from Wearable IMU and Audio Sensors
 
-> **NTU CS Final Year Project (FYP)**
-> Automated sleep stage classification using accelerometer and gyroscope data from a wearable device
+> **NTU CS Final Year Project (FYP)**  
+> Automated 3-class sleep staging (Wake / NREM / REM) using a wrist/pillow-worn device combining a 6-axis IMU and PDM microphone, deployed on the Seeed XIAO nRF52840 Sense.
 
-[![Python](https://img.shields.io/badge/Python-3.8+-blue.svg)](https://www.python.org/)
-[![XGBoost](https://img.shields.io/badge/XGBoost-1.7+-green.svg)](https://xgboost.readthedocs.io/)
+[![Python](https://img.shields.io/badge/Python-3.12-blue.svg)](https://www.python.org/)
+[![XGBoost](https://img.shields.io/badge/XGBoost-3.x-green.svg)](https://xgboost.readthedocs.io/)
+[![Arduino](https://img.shields.io/badge/Arduino-IDE_2.x-teal.svg)](https://www.arduino.cc/)
 [![License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 ---
 
-## 📋 Table of Contents
+## Table of Contents
 
 - [Overview](#overview)
 - [Key Results](#key-results)
@@ -19,602 +20,335 @@
 - [Installation](#installation)
 - [Usage](#usage)
 - [Hardware Deployment](#hardware-deployment)
-- [Results & Analysis](#results--analysis)
+- [Results](#results)
 - [Future Work](#future-work)
-- [References](#references)
 
 ---
 
-## 🎯 Overview
+## Overview
 
-This project develops an automated sleep stage classification system using **IMU (Inertial Measurement Unit) sensors** from a wearable device (PillowClip). The system achieves competitive performance for sleep staging using only movement and orientation data, without requiring EEG or other invasive sensors.
+Traditional sleep staging requires polysomnography (PSG) with EEG electrodes in a clinical setting — expensive, uncomfortable, and impractical for home monitoring. This project builds an automated sleep staging pipeline using only a small wearable device (PillowClip) containing a 6-axis IMU and microphone.
 
-### Problem Statement
-
-Traditional sleep staging requires polysomnography (PSG) with multiple sensors including EEG, which is:
-- Expensive and requires clinical setting
-- Uncomfortable for patients
-- Not suitable for long-term monitoring
-
-**Our Solution:** Classify sleep stages using only IMU sensors (accelerometer + gyroscope) from a small wearable device.
+The pipeline covers:
+- PSG–IMU data synchronisation across 44 patients
+- Feature engineering: 98 IMU features + 20 audio features = **118 total**
+- Patient-level cross-validated XGBoost classifier
+- Real-time inference firmware for the nRF52840 microcontroller with RGB LED feedback
 
 ### Key Contributions
 
-1. **Patient-Specific Normalization** - Novel approach to handle inter-patient variability (+19 Kappa points improvement)
-2. **Comprehensive Feature Engineering** - 97 features capturing movement, temporal, and patient-specific patterns
-3. **Production-Ready Deployment** - Real-time inference on embedded hardware (nRF52840)
-4. **Systematic Multimodal Evaluation** - Rigorous analysis showing IMU sufficiency for this device
+1. **Patient-specific normalisation** — online running-mean baseline per patient, updated each epoch, giving the single largest Kappa improvement
+2. **Audio feature integration** — top-20 spectral and energy features from the PDM microphone evaluated alongside IMU; 118-feature model achieves Kappa = 0.3234
+3. **Embedded deployment** — full 118-feature XGBoost model (20 trees) exported to a C header via `micromlgen` and flashed to the nRF52840 within the 1 MB flash budget
+4. **RGB LED feedback** — Red = Wake, Green = NREM, Blue = REM, updated every 30-second epoch
 
 ---
 
-## 🏆 Key Results
+## Key Results
 
-### Performance Metrics
-
-**3-Class Classification (Wake, NREM, REM):**
+**3-Class Classification (Wake / NREM / REM) — 5-fold patient-level CV:**
 
 | Metric | Value |
 |--------|-------|
-| **Cohen's Kappa** | **0.290 ± 0.059** |
-| **Accuracy** | **59.1 ± 4.0%** |
-| **Macro F1-Score** | **0.47 ± 0.05** |
+| **Cohen's Kappa** | **0.3234 ± 0.0741** |
+| **Accuracy** | **58.29 ± 5.00%** |
+| **Macro F1-Score** | **0.5305 ± 0.0562** |
 
-**Per-Class Performance:**
-- Wake: F1 = 0.63
-- NREM: F1 = 0.66
-- REM: F1 = 0.21
+**Per-Class Performance (concatenated CV predictions):**
 
-**Hardware Performance:**
-- Inference Time: ~12ms per epoch
-- Flash Memory: 857 KB (83% of 1MB)
-- Model: XGBoost (50 trees, 134 features)
+| Class | Precision | Recall | F1 | Support |
+|-------|-----------|--------|----|---------|
+| Wake | 0.611 | 0.666 | 0.637 | 2,285 |
+| NREM | 0.669 | 0.578 | 0.620 | 3,166 |
+| REM | 0.331 | 0.406 | 0.364 | 976 |
+| **Macro avg** | **0.537** | **0.550** | **0.540** | 6,427 |
 
-### Performance Progression
+**Per-Fold Results:**
 
-| Stage | Features | Kappa | Improvement |
-|-------|----------|-------|-------------|
-| Baseline (IMU raw) | 36 | 0.020 | - |
-| + Enhanced features | 97 | 0.290 | **+0.270** |
-| + Audio features | 163 | 0.285 | -0.005 |
-| **Final (optimized)** | **97** | **0.290** | - |
+| Fold | Test Patients | n_test | Kappa | Accuracy | F1-Macro |
+|------|--------------|--------|-------|----------|----------|
+| 1 | 9 | 1,260 | 0.2710 | 56.98% | 0.4643 |
+| 2 | 9 | 1,315 | 0.2603 | 52.62% | 0.4990 |
+| 3 | 8 | 1,245 | 0.2789 | 54.86% | 0.5110 |
+| 4 | 9 | 1,302 | 0.3884 | 64.06% | 0.5857 |
+| 5 | 9 | 1,305 | 0.4185 | 62.91% | 0.5925 |
+| **Mean** | | | **0.3234** | **58.29%** | **0.5305** |
+| **Std** | | | **0.0741** | **5.00%** | **0.0562** |
 
-**Key Finding:** Patient-specific normalization and temporal features provide 13.5x improvement over baseline, while audio features do not help due to low signal quality.
+**Hardware:**
+
+| Metric | Value |
+|--------|-------|
+| Inference time | ~12 ms per epoch |
+| Flash usage | within 1 MB budget |
+| Model | XGBoost, 20 trees, 118 features |
+| Platform | Seeed XIAO nRF52840 Sense |
 
 ---
 
-## 📊 Dataset
+## Dataset
 
-### Data Sources
+### Sources
 
-- **PSG Data:** Polysomnography recordings with expert-annotated sleep stages
-  - 44 patients
-  - ~58 hours of sleep data
-  - 6,427 30-second epochs
-  - 5 sleep stages: Wake, N1, N2, N3, REM
+- **PSG data:** Expert-annotated polysomnography recordings
+  - 44 patients, 6,427 epochs (30 s each)
+  - 5 stages: Wake, N1, N2, N3, REM — consolidated to 3 classes
 
-- **PillowClip Sensor Data:** Wearable IMU device
-  - 6-axis IMU: 3-axis accelerometer + 3-axis gyroscope
-  - Temperature sensor
-  - Microphone (evaluated but not used in final model)
-  - Sampling rate: ~1 Hz (aggregated from 50 Hz)
+- **PillowClip sensor:** Wearable device worn on or near a pillow
+  - 6-axis IMU: 3-axis accelerometer + 3-axis gyroscope at ~50 Hz (aggregated to 1 Hz per epoch)
+  - PDM microphone: 16 kHz, processed as 256-sample windows
 
-### Data Synchronization
+### Synchronisation
 
-**Challenge:** PSG and PillowClip recordings start at different times
-
-**Solution:**
-- Timestamp-based synchronization (31 patients)
-- Sequential alignment (13 patients)
-- Validation against expert annotations
-
-**Quality Metrics:**
-- Mean overlap: 85.4 minutes per patient
-- Synchronization accuracy: ±30 seconds
-- Data completeness: 100% (all epochs matched)
+| Method | Patients |
+|--------|----------|
+| Timestamp-based (absolute clock match) | 31 |
+| Sequential alignment (no start-time metadata) | 13 |
 
 ### Class Distribution
 
-| Stage | Count | Percentage |
-|-------|-------|------------|
-| Wake | 2,285 | 35.6% |
-| N1 | 718 | 11.2% |
-| N2 | 1,242 | 19.3% |
-| N3 | 1,206 | 18.8% |
-| REM | 976 | 15.2% |
-
-**3-Class Mapping:**
-- Wake → Wake (35.6%)
-- N1 + N2 + N3 → NREM (49.3%)
-- REM → REM (15.2%)
+| Stage (5-class) | Count | % | 3-class mapping |
+|-----------------|-------|---|-----------------|
+| Wake | 2,285 | 35.6% | Wake |
+| N1 | 718 | 11.2% | NREM |
+| N2 | 1,242 | 19.3% | NREM |
+| N3 | 1,206 | 18.8% | NREM |
+| REM | 976 | 15.2% | REM |
 
 ---
 
-## 🔬 Methodology
+## Methodology
 
-### 1. Data Processing Pipeline
+### Pipeline
 
 ```
-Raw PSG Data     →  Sleep Stage Labels (30-sec epochs)
-Raw IMU Data     →  Synchronized IMU Features (30-sec epochs)
-                 ↓
-         Feature Engineering (97 features)
-                 ↓
-         Patient-Level Cross-Validation
-                 ↓
-         XGBoost Classification
-                 ↓
-         Sleep Stage Predictions
+PSG annotations  ─┐
+                   ├─ Synchronisation ─► Feature extraction (118 feat) ─► XGBoost CV ─► Predictions
+PillowClip IMU  ──┘                          (98 IMU + 20 audio)           5-fold GroupKFold
+PillowClip mic  ──┘
 ```
 
-### 2. Feature Engineering
+### Feature Engineering (118 features)
 
-**Raw IMU Features (36):**
-- Accelerometer: ax, ay, az (mean, std, min, max)
-- Gyroscope: gx, gy, gz (mean, std, min, max)
-- Temperature: tempC (mean, std, min, max)
+**IMU features (98):**
 
-**Enhanced Features (61 additional):**
+| Category | Count | Examples |
+|----------|-------|---------|
+| Raw axis statistics | 36 | `ax_mean`, `gz_std`, `tempC_max` |
+| Movement magnitude | 21 | `acc_mag`, `gyro_mag`, `total_movement` |
+| Patient normalisation | 12 | `patient_acc_mean`, `relative_activity`, `patient_wake_ratio` |
+| Temporal / rolling | 6 | `acc_mag_rolling_mean_5`, `movement_diff` |
+| Orientation | 7 | `ax_dominance`, `tilt_estimate` |
+| Derived / variability | 17 | `stillness_duration`, `movement_bout_count` |
+| Circadian | 4 | `time_since_start_min`, `sleep_cycle_sin/cos` |
 
-**Movement Magnitude (12):**
-- `acc_mag = √(ax² + ay² + az²)`
-- `gyro_mag = √(gx² + gy² + gz²)`
-- Total movement, movement ratio, movement balance
+**Audio features (top 20 by importance):**
 
-**Patient-Specific Normalization (13):**
-- Patient baseline statistics (mean, std, median)
-- Normalized features: `(value - patient_mean) / patient_std`
-- Patient wake ratio, percentiles
+| Rank | Feature | Importance |
+|------|---------|------------|
+| 1 | spectral_centroid_normalized | 0.00879 |
+| 2 | crest_variability | 0.00843 |
+| 3 | spectral_stability | 0.00823 |
+| 4 | energy_rolling_std | 0.00794 |
+| 5 | activity_variability | 0.00725 |
+| … | … | … |
 
-**Temporal Features (15):**
-- Previous epoch features
-- Rolling means/stds (3, 5 epochs)
-- Movement differences
-- Movement bout counting
+Audio features are computed from a single 256-sample PDM window per epoch (streaming accumulator, no 30-second buffer). All spectral features are power-ratio quantities so FFT scaling cancels.
 
-**Orientation & Posture (7):**
-- Axis dominance (which axis has most movement)
-- Tilt estimation
-- Position change indicators
+### Model
 
-**Circadian Features (3):**
-- Time since sleep start
-- Sleep cycle encoding (90-min cycles): sin/cos features
-
-**Variability Features (6):**
-- Coefficient of variation
-- Movement range
-- Stillness indicators
-
-**Audio Features (evaluated but excluded):**
-- 66 audio features tested
-- Breathing, snoring, spectral analysis
-- **Result:** No improvement (Kappa 0.285 vs 0.290)
-- **Reason:** 97% silence, low SNR, poor mic placement
-
-### 3. Model Selection
-
-**Models Evaluated:**
-- Logistic Regression (baseline)
-- Random Forest
-- **XGBoost** ⭐ (selected)
-- LightGBM
-- Neural Network (LSTM + embeddings)
-- Ensemble methods
-
-**Why XGBoost:**
-- Best single-model performance
-- Handles class imbalance well
-- Feature importance analysis
-- Efficient inference
-- Deployable to embedded hardware
-
-**Final Model Configuration:**
 ```python
 XGBClassifier(
-    n_estimators=50,        # For hardware deployment
+    n_estimators=20,       # reduced from 100 to fit nRF52840 1 MB flash
     max_depth=6,
     learning_rate=0.1,
-    min_child_weight=1,
     subsample=0.8,
     colsample_bytree=0.8,
+    objective='multi:softmax',
     random_state=42
 )
+# Class weights: compute_class_weight('balanced') applied as sample_weight per fold
 ```
 
-### 4. Evaluation Strategy
+### Evaluation
 
-**Cross-Validation:**
-- **5-fold patient-level GroupKFold**
-- Ensures no patient appears in both train and test
-- Prevents data leakage
-- Models generalization to new patients
-
-**Metrics:**
-- Cohen's Kappa (primary) - accounts for chance agreement
-- Accuracy
-- Macro F1-Score - handles class imbalance
-- Per-class F1 scores
-- Confusion matrices
+- **5-fold patient-level GroupKFold** — no patient appears in both train and test sets
+- **Primary metric:** Cohen's Kappa (accounts for chance agreement)
+- **Secondary:** Accuracy, Macro F1, per-class precision/recall/F1, confusion matrix
 
 ---
 
-## 📁 Repository Structure
+## Repository Structure
 
 ```
 Sleep_Stage_Classifier_Clean/
-├── README.md                          # This file
-├── REPORT_GUIDE.md                    # Detailed guide for writing FYP report
-├── RESULTS_SUMMARY.md                 # All experimental results
+├── .gitignore
+├── README.md
+├── requirements.txt
+├── generate_figures.py              # Produces all report figures → docs/images/
 │
-├── data/                              # Data processing scripts
-│   ├── README.md                      # Data documentation
-│   ├── synchronize_data.py            # PSG-IMU synchronization
-│   └── data_overview.txt              # Dataset statistics
-│
-├── src/                               # Source code
+├── src/
 │   ├── preprocessing/
-│   │   ├── synchronize_psg_imu.py     # Data alignment
-│   │   └── extract_features.py        # Basic feature extraction
-│   │
+│   │   └── synchronize_psg_imu.py  # PSG–IMU alignment
 │   ├── feature_engineering/
-│   │   ├── enhanced_features.py       # Movement, temporal features
-│   │   ├── patient_normalization.py   # Patient-specific features
-│   │   └── audio_features.py          # Audio feature extraction
-│   │
+│   │   └── enhanced_features.py    # 98 IMU feature extraction
 │   ├── modeling/
-│   │   ├── train_xgboost.py          # XGBoost training
-│   │   ├── train_neural_net.py       # Neural network (LSTM)
-│   │   └── ensemble.py               # Ensemble methods
-│   │
+│   │   ├── train_xgboost.py        # IMU-only model training
+│   │   ├── train_audio_model.py    # 118-feature audio+IMU training
+│   │   ├── xgboost_audio_model.json
+│   │   └── xgboost_chip_model.json
 │   └── evaluation/
-│       ├── cross_validation.py        # Patient-level CV
-│       ├── feature_importance.py      # Feature analysis
-│       └── performance_metrics.py     # Evaluation metrics
+│       ├── feature_importance.py
+│       └── audio_comparison_weighted.py
 │
-├── models/                            # Trained models
-│   ├── xgboost_best.pkl               # Best XGBoost model (97 features)
-│   ├── xgboost_chip.pkl               # Chip-optimized model (50 trees)
-│   ├── scaler.pkl                     # Feature scaler
-│   └── feature_names.txt              # Feature list
+├── results/
+│   ├── audio_feature_importance.csv         # Per-feature importance + is_audio flag
+│   └── audio_model_117feat_results.txt      # Full CV results (118 features)
 │
-├── hardware/                          # Embedded deployment
-│   ├── README.md                      # Hardware deployment guide
+├── docs/
+│   ├── appendix_source_code.tex             # LaTeX appendix for FYP report
+│   └── images/                              # Generated report figures
+│
+├── hardware/
 │   ├── firmware/
-│   │   └── SleepClassifier.ino        # Arduino firmware
-│   │
+│   │   └── SleepClassifier_Audio_XGBoost/
+│   │       ├── SleepClassifier_Audio_XGBoost.ino
+│   │       ├── sleep_types.h
+│   │       └── sleep_model_audio/
+│   │           ├── features_audio.h         # FEAT_* index defines
+│   │           ├── scaler_audio.h           # StandardScaler params
+│   │           └── xgboost_audio.h          # Decision trees (micromlgen)
 │   └── model_export/
-│       ├── export_to_c.py             # Model → C code export
-│       ├── sleep_model.h              # XGBoost model (C header)
-│       ├── scaler_params.h            # Feature scaling params
-│       └── features.h                 # Feature definitions
+│       ├── export_audio_to_c.py             # Model → C header via micromlgen
+│       └── export_to_c.py
 │
-├── results/                           # Experimental results
-│   ├── performance_comparison.csv     # All model comparisons
-│   ├── feature_importance.csv         # Feature rankings
-│   ├── confusion_matrices/            # Per-model confusion matrices
-│   └── figures/                       # Plots and visualizations
-│
-├── docs/                              # Documentation
-│   ├── METHODOLOGY.md                 # Detailed methodology
-│   ├── DATA_SYNCHRONIZATION.md        # Sync approach explained
-│   ├── FEATURE_ENGINEERING.md         # Feature descriptions
-│   ├── AUDIO_EVALUATION.md            # Audio feature analysis
-│   └── HARDWARE_DEPLOYMENT.md         # Deployment guide
-│
-└── notebooks/                         # Jupyter notebooks
-    ├── 01_data_exploration.ipynb      # Data analysis
-    ├── 02_feature_analysis.ipynb      # Feature importance
-    ├── 03_model_comparison.ipynb      # Model evaluation
-    └── 04_results_visualization.ipynb # Results plots
+└── models/                                  # .pkl files (gitignored — too large)
 ```
 
 ---
 
-## 🚀 Installation
+## Installation
 
-### Requirements
+**Requirements:** Python 3.12, macOS/Linux. Arduino IDE 2.x + Seeed nRF52 board package for firmware.
 
-- Python 3.8+
-- CUDA (optional, for GPU acceleration)
-
-### Setup
-
-1. **Clone repository:**
 ```bash
-git clone https://github.com/yourusername/sleep-stage-classifier.git
+git clone https://github.com/<your-username>/sleep-stage-classifier.git
 cd sleep-stage-classifier
-```
 
-2. **Create virtual environment:**
-```bash
-python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
-```
+python3 -m venv venv
+source venv/bin/activate
 
-3. **Install dependencies:**
-```bash
 pip install -r requirements.txt
 ```
 
-**Core dependencies:**
-```
-numpy>=1.21.0
-pandas>=1.3.0
-scikit-learn>=1.0.0
-xgboost>=1.7.0
-scipy>=1.7.0
-matplotlib>=3.4.0
-seaborn>=0.11.0
-```
-
 ---
 
-## 💻 Usage
+## Usage
 
-### 1. Data Preparation
+### 1. Synchronise PSG and IMU data
 
 ```bash
-# Synchronize PSG and IMU data
 python src/preprocessing/synchronize_psg_imu.py \
     --psg_dir data/raw/PSG_Data \
     --imu_dir data/raw/PillowClip_Data \
     --output_dir data/processed/Synchronized_Data
 ```
 
-### 2. Feature Engineering
+### 2. Extract features and build dataset
 
 ```bash
-# Extract enhanced features
 python src/feature_engineering/enhanced_features.py \
     --input_dir data/processed/Synchronized_Data \
-    --output data/processed/sleep_dataset.pkl
+    --output data/processed/sleep_dataset_optimized.pkl
 ```
 
-### 3. Model Training
+### 3. Train the 118-feature audio+IMU model
 
 ```bash
-# Train XGBoost model
-python src/modeling/train_xgboost.py \
-    --data data/processed/sleep_dataset.pkl \
-    --output models/xgboost_best.pkl \
-    --cv_folds 5
+python src/modeling/train_audio_model.py
+# Writes results to results/audio_model_117feat_results.txt
 ```
 
-### 4. Evaluation
+### 4. Regenerate report figures
 
 ```bash
-# Run cross-validation evaluation
-python src/evaluation/cross_validation.py \
-    --model models/xgboost_best.pkl \
-    --data data/processed/sleep_dataset.pkl \
-    --output results/performance.csv
+python generate_figures.py
+# Saves all figures to docs/images/
 ```
 
-### 5. Feature Importance Analysis
+### 5. Export model to C headers for firmware
 
 ```bash
-# Analyze feature importance
-python src/evaluation/feature_importance.py \
-    --model models/xgboost_best.pkl \
-    --data data/processed/sleep_dataset.pkl \
-    --output results/feature_importance.csv
+python hardware/model_export/export_audio_to_c.py
+# Writes features_audio.h, scaler_audio.h, xgboost_audio.h
 ```
 
 ---
 
-## 🔧 Hardware Deployment
+## Hardware Deployment
 
-### Target Device
+**Target:** Seeed XIAO nRF52840 Sense  
+- ARM Cortex-M4F @ 64 MHz with hardware FPU  
+- 1 MB flash, 256 KB RAM  
+- LSM6DS3 6-axis IMU  
+- MP34DT06JTR PDM microphone (16 kHz)  
+- RGB LED (active-LOW: LEDR / LEDG / LEDB)
 
-**Seeed XIAO nRF52840 Sense**
-- MCU: Nordic nRF52840 (ARM Cortex-M4)
-- Flash: 1 MB
-- RAM: 256 KB
-- IMU: LSM6DS3 (6-axis)
-- Clock: 64 MHz
+**Firmware** (`hardware/firmware/SleepClassifier_Audio_XGBoost/`):
+- Samples IMU at 1 Hz; accumulates one 256-sample PDM window per epoch
+- Extracts all 118 features in under 12 ms
+- Classifies with XGBoost (20 trees) via `Eloquent::ML::Port::XGBClassifier`
+- Updates RGB LED: **Red = Wake, Green = NREM, Blue = REM**
+- Patient baseline updated online (running mean, O(1) per epoch)
 
-### Deployment Steps
-
-1. **Export model to C:**
-```bash
-python hardware/model_export/export_to_c.py \
-    --model models/xgboost_chip.pkl \
-    --output hardware/model_export/sleep_model.h
-```
-
-2. **Flash firmware:**
-```bash
-# Open Arduino IDE
-# Load hardware/firmware/SleepClassifier.ino
-# Select Board: Seeed XIAO nRF52840 Sense
-# Upload
-```
-
-3. **Monitor output:**
-```bash
-# Open Serial Monitor (115200 baud)
-# Observe real-time sleep stage predictions
-```
-
-### Hardware Performance
-
-| Metric | Value |
-|--------|-------|
-| Inference Time | 12 ms |
-| Flash Usage | 857 KB (83%) |
-| RAM Usage | 45 KB (18%) |
-| Power Draw | ~15 mA @ 3.3V |
-| Battery Life | ~24 hours (200mAh) |
-
-**See [docs/HARDWARE_DEPLOYMENT.md](docs/HARDWARE_DEPLOYMENT.md) for details.**
+**To flash:**
+1. Open `SleepClassifier_Audio_XGBoost.ino` in Arduino IDE 2.x
+2. Board: *Seeed nRF52 Boards* → *Seeed XIAO nRF52840 Sense*
+3. Upload
 
 ---
 
-## 📈 Results & Analysis
+## Results
 
-### Overall Performance
+### Confusion Matrix
 
-**Best Model: XGBoost with 97 IMU-enhanced features**
-
-**3-Class Classification:**
 ```
-              precision    recall  f1-score   support
-
-        Wake       0.66      0.66      0.66      2285
-        NREM       0.69      0.69      0.66      3166
-         REM       0.15      0.15      0.21       976
-
-    accuracy                           0.59      6427
-   macro avg       0.50      0.50      0.47      6427
-weighted avg       0.59      0.59      0.59      6427
-
-Cohen's Kappa: 0.290 ± 0.059
+                Pred:Wake  Pred:NREM  Pred:REM
+  True:Wake      1,521       552       212     (66.6% recall)
+  True:NREM        745     1,831       590     (57.8% recall)
+  True:REM         225       355       396     (40.6% recall)
 ```
 
-**Confusion Matrix:**
-```
-              Predicted
-Actual    Wake   NREM   REM
-Wake      1510    700    75
-NREM       796   2191   179
-REM        198    632   146
-```
+### Feature Category Importance
 
-### Feature Importance (Top 10)
-
-| Rank | Feature | Importance | Category |
-|------|---------|------------|----------|
-| 1 | patient_wake_ratio | 0.054 | Patient-specific |
-| 2 | patient_acc_median | 0.038 | Patient-specific |
-| 3 | patient_acc_mean | 0.035 | Patient-specific |
-| 4 | time_since_start_min | 0.026 | Temporal |
-| 5 | movement_bout_count | 0.024 | Movement |
-| 6 | ay_mean | 0.021 | Raw IMU |
-| 7 | ay_max | 0.020 | Raw IMU |
-| 8 | patient_gyro_mean | 0.019 | Patient-specific |
-| 9 | acc_mag_rolling_mean_5 | 0.016 | Temporal |
-| 10 | ax_dominance | 0.016 | Orientation |
-
-**Key Insight:** Patient-specific and temporal features dominate (top 4/10)
-
-### Model Comparison
-
-| Model | Features | Kappa | Accuracy | F1-Macro | Notes |
-|-------|----------|-------|----------|----------|-------|
-| Baseline (Logistic) | 36 | 0.040 | 42% | 0.25 | Raw IMU only |
-| Random Forest | 36 | 0.050 | 45% | 0.28 | Raw IMU only |
-| **XGBoost (raw)** | 36 | 0.020 | 38% | 0.20 | Baseline |
-| **XGBoost (enhanced)** | **97** | **0.290** | **59%** | **0.47** | **Best** ⭐ |
-| XGBoost (+ audio) | 163 | 0.285 | 59% | 0.47 | Audio doesn't help |
-| Neural Net (LSTM) | 97 | 0.270 | 57% | 0.45 | Slower inference |
-| Ensemble (XGB+NN) | 97 | 0.285 | 58% | 0.46 | Marginal gain |
-
-### Audio Feature Evaluation
-
-**Finding:** Audio features **do not improve** performance
-
-| Configuration | Features | Kappa | Result |
-|--------------|----------|-------|--------|
-| IMU only | 97 | 0.290 | Best ✅ |
-| IMU + All audio | 163 | 0.285 | Worse |
-| IMU + Top 10 audio | 107 | 0.286 | No gain |
-
-**Reasons:**
-- 97% of recording is silence
-- Poor microphone placement (under pillow)
-- Environmental noise dominates
-- IMU features already capture sleep patterns
-
-**Contribution:** This is a valid research finding showing IMU sufficiency for this device type.
+| Category | Features | Total Importance |
+|----------|----------|-----------------|
+| Raw IMU axes | 36 | ~30% |
+| Patient normalisation | 12 | ~21% |
+| Audio | 20 | ~12% |
+| Movement magnitude | 21 | ~11% |
+| Derived / statistical | 17 | ~11% |
+| Circadian / temporal | 4 | ~9% |
+| Temporal / rolling | 6 | ~4% |
 
 ---
 
-## 🔮 Future Work
+## Future Work
 
-### Short-term Improvements
-
-1. **Hyperparameter Optimization**
-   - Grid search / Bayesian optimization
-   - Expected gain: +0.02-0.05 Kappa
-
-2. **Ensemble Methods**
-   - XGBoost + LSTM weighted ensemble
-   - Expected gain: +0.01-0.03 Kappa
-
-3. **Feature Selection**
-   - Remove redundant features
-   - Faster inference, similar performance
-
-### Long-term Research Directions
-
-1. **Larger Dataset**
-   - More patients → better generalization
-   - Target: 100+ patients
-
-2. **Transfer Learning**
-   - Pre-train on large sleep dataset
-   - Fine-tune on PillowClip data
-
-3. **Real-time Adaptation**
-   - Online learning for personalization
-   - Adapt to individual sleep patterns
-
-4. **Better Audio Hardware**
-   - Higher-quality microphone
-   - Better placement (near nose/mouth)
-   - May enable breathing rate features
-
-5. **Multi-night Analysis**
-   - Track sleep patterns over time
-   - Detect long-term changes
-   - Sleep quality trends
+- **Larger dataset** — 100+ patients for better generalisation
+- **Hyperparameter search** — Bayesian optimisation on n_estimators, max_depth
+- **Better microphone placement** — near-mouth positioning for breathing rate features
+- **Multi-night tracking** — longitudinal sleep quality trends
+- **Online personalisation** — continual learning as the patient baseline converges
 
 ---
 
-## 📚 References
+## Contact
 
-### Sleep Staging Literature
-
-1. **ActiGraph-based sleep staging:**
-   - Kosmadopoulos et al. (2018) - Kappa 0.35 (3-class)
-
-2. **Wearable IMU for sleep:**
-   - Walch et al. (2019) - Accuracy 68% (2-class)
-
-3. **Deep learning for sleep staging:**
-   - Sors et al. (2018) - Kappa 0.48 (EEG-based)
-
-### Technical Resources
-
-- **XGBoost:** Chen & Guestrin (2016) - XGBoost: A Scalable Tree Boosting System
-- **Cohen's Kappa:** Cohen (1960) - A coefficient of agreement for nominal scales
-- **Class Imbalance:** Chawla et al. (2002) - SMOTE: Synthetic Minority Over-sampling Technique
+**Author:** [Your Name]  
+**Institution:** Nanyang Technological University (NTU)  
+**Course:** Computer Science Final Year Project 2024/2025  
 
 ---
 
-## 📧 Contact
-
-**Author:** [Your Name]
-**Email:** [your.email@example.com]
-**Institution:** Nanyang Technological University (NTU)
-**Course:** Computer Science Final Year Project
-**Year:** 2024/2025
-
----
-
-## 📄 License
-
-This project is licensed under the MIT License - see [LICENSE](LICENSE) file for details.
-
----
-
-## 🙏 Acknowledgments
-
-- NTU School of Computer Science and Engineering
-- Project supervisor: [Supervisor Name]
-- PSG dataset providers
-- Seeed Studio for XIAO nRF52840 hardware
-
----
-
-**Last Updated:** March 2025
+*All Python code developed under Python 3.12, macOS Sequoia. Arduino firmware compiled with Arduino IDE 2.x and Seeed nRF52 board package.*

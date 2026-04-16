@@ -1,0 +1,684 @@
+\appendix
+\chapter{Source Code Listings}
+\label{app:source_code}
+
+This appendix contains the complete source code for the sleep stage classification
+system. Python listings cover the data processing, feature engineering, model
+training, and evaluation pipeline. Arduino/C listings cover the nRF52840 firmware.
+All Python code was developed under Python~3.12 and tested on macOS Sequoia.
+Arduino firmware was compiled and flashed using Arduino IDE~2.x with the Seeed
+nRF52 board package.
+
+\section{Environment Setup}
+\label{app:env_setup}
+
+\begin{bashcode}
+# Create and activate virtual environment
+python3 -m venv venv
+source venv/bin/activate        # macOS / Linux
+
+# Install all dependencies
+pip install -r requirements.txt
+\end{bashcode}
+
+\newpage
+\section{Repository Structure and Reproducibility Seed}
+\label{app:repo_structure}
+
+\begin{verbatim}
+
+Sleep_Stage_Classifier/
+├── data/                     # Raw data (excluded from Git)
+├── src/
+│   ├── preprocessing/        # Data synchronisation
+│   ├── feature_engineering/  # Feature extraction
+│   ├── modeling/             # Model training
+│   └── evaluation/           # Performance analysis
+├── results/                  # Figures and CSV results
+├── hardware/
+│   ├── model_export/         # micromlgen export scripts
+│   └── firmware/
+│       └── SleepClassifier_Audio_XGBoost/   # nRF52840 Arduino firmware
+├── requirements.txt
+├── .gitignore
+└── README.md
+
+\end{verbatim}
+
+\begin{pycode}
+import numpy as np
+import random
+
+SEED = 42
+np.random.seed(SEED)
+random.seed(SEED)
+\end{pycode}
+
+\section{Data Loading}
+\label{app:data_loading}
+
+\begin{pycode}
+import pandas as pd
+import pyedflib
+
+def load_psg_data(edf_path, annotation_path):
+    """
+    Load PSG sleep stage annotations from CSV/XML.
+    Returns DataFrame with 3-class consolidated labels.
+    """
+    annotations = pd.read_csv(annotation_path)
+
+    stage_mapping = {
+        'Wake': 0, 'W': 0,
+        'N1': 1, 'N2': 1, 'N3': 1, 'N4': 1,
+        'REM': 2, 'R': 2
+    }
+    annotations['sleep_stage_3class'] = (
+        annotations['sleep_stage'].map(stage_mapping)
+    )
+    return annotations
+\end{pycode}
+
+\begin{pycode}
+def load_imu_data(csv_path):
+    """
+    Load IMU sensor data from PillowClip device CSV.
+    Columns: ts_ms, ax, ay, az, gx, gy, gz, tempC
+    """
+    imu_data = pd.read_csv(csv_path)
+    imu_data['timestamp'] = imu_data['ts_ms'] / 1000.0
+    imu_data = resample_to_1hz(imu_data)
+    return imu_data
+\end{pycode}
+
+\section{Data Synchronisation}
+\label{app:synchronisation}
+
+\begin{pycode}
+def synchronize_timestamp_based(psg_annotations, imu_data):
+    """
+    Align PSG and IMU using absolute timestamps.
+    Requires both systems to have matching absolute time references.
+    """
+    synchronized_epochs = []
+
+    for idx, row in psg_annotations.iterrows():
+        epoch_start = row['timestamp']
+        epoch_end   = epoch_start + 30
+
+        mask = ((imu_data['timestamp'] >= epoch_start) &
+                (imu_data['timestamp'] <  epoch_end))
+        imu_epoch = imu_data[mask]
+
+        if len(imu_epoch) >= 25:   # 5-sample tolerance
+            synchronized_epochs.append({
+                'patient_id':  row['patient_id'],
+                'epoch_id':    idx,
+                'sleep_stage': row['sleep_stage_3class'],
+                'imu_data':    imu_epoch
+            })
+
+    return synchronized_epochs
+\end{pycode}
+
+\begin{pycode}
+def synchronize_sequential(psg_annotations, imu_data,
+                            samples_per_epoch=30):
+    """
+    Align PSG and IMU via sequential epoch matching.
+    Used when precise start-time metadata is unavailable.
+    """
+    synchronized_epochs = []
+    n_epochs = len(psg_annotations)
+
+    for i in range(n_epochs):
+        start_idx = i * samples_per_epoch
+        end_idx   = start_idx + samples_per_epoch
+
+        if end_idx <= len(imu_data):
+            imu_epoch = imu_data.iloc[start_idx:end_idx]
+            synchronized_epochs.append({
+                'patient_id':  psg_annotations.iloc[i]['patient_id'],
+                'epoch_id':    i,
+                'sleep_stage': psg_annotations.iloc[i]['sleep_stage_3class'],
+                'imu_data':    imu_epoch
+            })
+
+    return synchronized_epochs
+\end{pycode}
+
+\begin{pycode}
+def validate_synchronization(synchronized_epochs):
+    """
+    Validate synchronisation quality via wake/sleep variance ratio.
+    Accepts sessions with ratio > 1.5.
+    """
+    wake_var  = []
+    sleep_var = []
+
+    for epoch in synchronized_epochs:
+        imu      = epoch['imu_data']
+        variance = np.var(imu['ax'])
+        if epoch['sleep_stage'] == 0:
+            wake_var.append(variance)
+        else:
+            sleep_var.append(variance)
+
+    ratio = np.mean(wake_var) / (np.mean(sleep_var) + 1e-6)
+    print(f"Wake/Sleep variance ratio: {ratio:.2f}  (threshold: >1.5)")
+    return ratio > 1.5
+\end{pycode}
+
+
+\section{Feature Extraction}
+\label{app:feature_extraction}
+
+\begin{pycode}
+def extract_all_features(epoch_data, patient_id, patient_stats):
+    """
+    Top-level dispatcher: extracts all 98 IMU features for one epoch.
+    The final 118-feature model appends 20 audio features separately.
+
+    Args:
+        epoch_data    : DataFrame, 30 rows x 6 IMU axes
+        patient_id    : str, participant identifier
+        patient_stats : dict, pre-computed per-patient baselines
+
+    Returns:
+        features : dict, 98 key-value pairs
+    """
+    features = {}
+    features.update(extract_baseline_features(epoch_data))        # 36
+    features.update(extract_movement_features(epoch_data))        # 12
+    features.update(extract_patient_features(                     # 14
+        epoch_data, patient_id, patient_stats))
+    features.update(extract_temporal_features(epoch_data))        # 15
+    features.update(extract_orientation_features(epoch_data))     #  7
+    features.update(extract_variability_features(epoch_data))     #  6
+    features.update(extract_bout_features(epoch_data))            #  5
+    features.update(extract_circadian_features(epoch_data))       #  3
+    return features
+\end{pycode}
+
+\begin{pycode}
+def extract_movement_features(epoch_data):
+    """Orientation-invariant magnitude features (12 features)."""
+    features = {}
+
+    ax, ay, az = epoch_data['ax'], epoch_data['ay'], epoch_data['az']
+    acc_mag    = np.sqrt(ax**2 + ay**2 + az**2)
+
+    features['acc_mag']     = np.mean(acc_mag)
+    features['acc_mag_std'] = np.std(acc_mag)
+    features['acc_mag_max'] = np.max(acc_mag)
+    features['acc_mag_min'] = np.min(acc_mag)
+
+    gx, gy, gz = epoch_data['gx'], epoch_data['gy'], epoch_data['gz']
+    gyro_mag   = np.sqrt(gx**2 + gy**2 + gz**2)
+
+    features['gyro_mag']     = np.mean(gyro_mag)
+    features['gyro_mag_std'] = np.std(gyro_mag)
+    features['total_movement'] = (features['acc_mag'] +
+                                  features['gyro_mag'])
+
+    threshold = 0.5   # g
+    features['movement_bout_count'] = count_threshold_crossings(
+        acc_mag, threshold)
+
+    stillness_threshold = 0.2   # g
+    features['stillness_duration'] = count_consecutive_below_threshold(
+        acc_mag, stillness_threshold)
+
+    return features
+\end{pycode}
+
+\begin{pycode}
+def extract_patient_features(epoch_data, patient_id, patient_stats):
+    """Patient-specific normalisation features (14 features)."""
+    features = {}
+    stats = patient_stats[patient_id]
+
+    acc_mag = np.mean(np.sqrt(
+        epoch_data['ax']**2 +
+        epoch_data['ay']**2 +
+        epoch_data['az']**2
+    ))
+
+    features['patient_acc_mean']   = stats['acc_mean']
+    features['patient_acc_median'] = stats['acc_median']
+    features['patient_acc_std']    = stats['acc_std']
+    features['patient_wake_ratio'] = stats['wake_ratio']
+
+    features['acc_mag_normalized'] = (
+        (acc_mag - stats['acc_mean']) / (stats['acc_std'] + 1e-6)
+    )
+    # relative_activity is an IMU patient-normalisation feature:
+    # current epoch magnitude relative to patient's baseline median.
+    features['relative_activity'] = (
+        acc_mag / (stats['acc_median'] + 1e-6)
+    )
+    features['acc_percentile'] = compute_percentile_rank(
+        acc_mag, stats['acc_distribution']
+    )
+    return features
+\end{pycode}
+
+
+\section{Dataset Serialisation}
+\label{app:serialisation}
+
+\begin{pycode}
+import pickle
+import numpy as np
+
+def create_final_dataset(synchronized_epochs, patient_stats,
+                          output_path='models/sleep_dataset_optimized.pkl'):
+    """
+    Runs feature extraction over all epochs and serialises the result.
+    """
+    X, y, patient_ids = [], [], []
+
+    for epoch in synchronized_epochs:
+        features = extract_all_features(
+            epoch['imu_data'], epoch['patient_id'], patient_stats
+        )
+        X.append(list(features.values()))
+        y.append(epoch['sleep_stage'])
+        patient_ids.append(epoch['patient_id'])
+
+    X           = np.array(X)
+    y           = np.array(y)
+    patient_ids = np.array(patient_ids)
+
+    dataset = {
+        'X_all_features': X,
+        'y_3class':        y,
+        'patient_ids':     patient_ids,
+        'feature_names':   list(features.keys()),
+        'n_features':      X.shape[1],
+        'n_samples':       X.shape[0],
+        'class_distribution': {
+            'Wake': int(np.sum(y == 0)),
+            'NREM': int(np.sum(y == 1)),
+            'REM':  int(np.sum(y == 2)),
+        }
+    }
+
+    with open(output_path, 'wb') as f:
+        pickle.dump(dataset, f)
+
+    print(f"Saved: {dataset['n_samples']} samples, "
+          f"{dataset['n_features']} features -> {output_path}")
+    return dataset
+\end{pycode}
+
+
+\section{Model Training}
+\label{app:training}
+
+\begin{pycode}
+from sklearn.model_selection import GroupKFold
+from sklearn.preprocessing import StandardScaler
+from sklearn.utils.class_weight import compute_class_weight
+from sklearn.metrics import cohen_kappa_score, accuracy_score, f1_score
+from xgboost import XGBClassifier
+import pickle, numpy as np
+
+def train_xgboost_model(dataset_path, n_splits=5):
+    """
+    Trains XGBoost with 5-fold patient-level GroupKFold CV and
+    class-balanced sample weights.  The cross-validation study uses
+    n_estimators=100; the final embedded model uses n_estimators=20
+    to satisfy the nRF52840 1 MB flash constraint.
+    """
+    with open(dataset_path, 'rb') as f:
+        data = pickle.load(f)
+
+    X, y, groups = (data['X_all_features'],
+                    data['y_3class'],
+                    data['patient_ids'])
+    gkf = GroupKFold(n_splits=n_splits)
+
+    kappa_scores, acc_scores, f1_scores = [], [], []
+
+    for fold, (train_idx, test_idx) in enumerate(
+            gkf.split(X, y, groups)):
+        print(f"\n=== Fold {fold + 1}/{n_splits} ===")
+
+        scaler  = StandardScaler()
+        X_train = scaler.fit_transform(X[train_idx])
+        X_test  = scaler.transform(X[test_idx])
+        y_train, y_test = y[train_idx], y[test_idx]
+
+        classes = np.unique(y_train)
+        cw = compute_class_weight('balanced',
+                                  classes=classes, y=y_train)
+        sample_weights = np.array(
+            [dict(zip(classes, cw))[yi] for yi in y_train]
+        )
+
+        model = XGBClassifier(
+            n_estimators=100,
+            max_depth=6,
+            learning_rate=0.1,
+            random_state=42,
+            eval_metric='mlogloss',
+            verbosity=0
+        )
+        model.fit(X_train, y_train, sample_weight=sample_weights)
+        y_pred = model.predict(X_test)
+
+        kappa = cohen_kappa_score(y_test, y_pred)
+        acc   = accuracy_score(y_test, y_pred)
+        f1    = f1_score(y_test, y_pred, average='macro')
+
+        kappa_scores.append(kappa)
+        acc_scores.append(acc)
+        f1_scores.append(f1)
+
+        print(f"Kappa: {kappa:.3f}  Accuracy: {acc:.3f}  "
+              f"F1-Macro: {f1:.3f}")
+
+    print(f"\n=== Mean Results ===")
+    print(f"Kappa:    {np.mean(kappa_scores):.3f} "
+          f"+- {np.std(kappa_scores):.3f}")
+    print(f"Accuracy: {np.mean(acc_scores):.3f} "
+          f"+- {np.std(acc_scores):.3f}")
+    print(f"F1-Macro: {np.mean(f1_scores):.3f} "
+          f"+- {np.std(f1_scores):.3f}")
+
+    return model
+\end{pycode}
+
+
+\section{Class Weight Computation}
+\label{app:class_weights}
+
+\begin{pycode}
+from sklearn.utils.class_weight import compute_class_weight
+import numpy as np
+
+def get_sample_weights(y_train):
+    """
+    Computes per-sample balanced class weights using scikit-learn.
+    Equivalent to w_c = N / (k * N_c) for each class c.
+
+    Returns a weight array aligned with y_train for use as
+    sample_weight in XGBClassifier.fit().
+    """
+    classes = np.unique(y_train)
+    cw = compute_class_weight('balanced',
+                               classes=classes, y=y_train)
+    weight_map = dict(zip(classes, cw))
+
+    sample_weights = np.array([weight_map[yi] for yi in y_train])
+    print(f"Class weights: { {int(k): round(v, 3)
+                               for k, v in weight_map.items()} }")
+    return sample_weights
+\end{pycode}
+
+
+\section{Feature Importance Analysis}
+\label{app:feature_importance}
+
+\begin{pycode}
+import pandas as pd
+
+def extract_feature_importance(model, feature_names,
+                                output_csv='results/feature_importance.csv'):
+    """
+    Extracts XGBoost Gini importance, ranks features, and saves to CSV.
+    """
+    importance_df = pd.DataFrame({
+        'feature':    feature_names,
+        'importance': model.feature_importances_
+    }).sort_values('importance', ascending=False)
+
+    importance_df.to_csv(output_csv, index=False)
+
+    print("\nTop 10 Features:")
+    print(importance_df.head(10).to_string(index=False))
+
+    return importance_df
+\end{pycode}
+
+
+\section{Model Export to C Header}
+\label{app:model_export}
+
+\begin{pycode}
+from micromlgen import port
+import pickle
+
+def export_xgboost_to_c(
+        model_pkl_path,
+        output_path='hardware/firmware/'
+                    'SleepClassifier_Audio_XGBoost/'
+                    'sleep_model_audio/xgboost_audio.h'):
+    """
+    Exports a trained XGBoost model to a C header for nRF52840 deployment
+    using the micromlgen library, which generates an
+    Eloquent::ML::Port::XGBClassifier class directly callable from Arduino.
+
+    Note: micromlgen requires the full sklearn XGBClassifier object
+    (not the raw booster JSON).
+    """
+    with open(model_pkl_path, 'rb') as f:
+        model = pickle.load(f)
+
+    c_code = port(model)
+
+    with open(output_path, 'w') as f:
+        f.write(c_code)
+
+    print(f"Model exported -> {output_path}")
+\end{pycode}
+
+
+\section{Arduino Firmware --- Main Loop}
+\label{app:firmware}
+
+\begin{ccode}
+// SleepClassifier_Audio_XGBoost.ino
+// nRF52840 main loop: 1 Hz IMU sampling, PDM microphone streaming,
+// 30-second epoch classification, and RGB LED sleep stage feedback.
+
+#include <Wire.h>
+#include <LSM6DS3.h>
+#include <PDM.h>
+#include "sleep_model_audio/xgboost_audio.h"   // micromlgen-generated
+#include "sleep_model_audio/scaler_audio.h"     // StandardScaler params
+#include "sleep_model_audio/features_audio.h"   // FEAT_* index defines
+
+LSM6DS3 imu(I2C_MODE, 0x6A);
+
+float imu_buffer[30][6];   // 30 samples x [ax, ay, az, gx, gy, gz]
+int   sample_count = 0;
+
+void setup() {
+    Serial.begin(115200);
+
+    if (imu.begin() != 0) {
+        Serial.println("IMU init failed!");
+        while (1);
+    }
+
+    // PDM microphone (16 kHz, mono)
+    PDM.onReceive(on_pdm_data);
+    if (!PDM.begin(1, 16000)) {
+        Serial.println("PDM init failed!");
+        while (1);
+    }
+
+    // XIAO nRF52840 Sense RGB LED (active-low)
+    // LEDR / LEDG / LEDB defined by the Seeed board package
+    pinMode(LEDR, OUTPUT);
+    pinMode(LEDG, OUTPUT);
+    pinMode(LEDB, OUTPUT);
+    set_rgb(false, false, false);   // all off
+
+    Serial.println("Sleep Stage Classifier Ready.");
+}
+
+void loop() {
+    // Collect one IMU sample at 1 Hz
+    imu_buffer[sample_count][0] = imu.readFloatAccelX();
+    imu_buffer[sample_count][1] = imu.readFloatAccelY();
+    imu_buffer[sample_count][2] = imu.readFloatAccelZ();
+    imu_buffer[sample_count][3] = imu.readFloatGyroX();
+    imu_buffer[sample_count][4] = imu.readFloatGyroY();
+    imu_buffer[sample_count][5] = imu.readFloatGyroZ();
+
+    sample_count++;
+
+    // After 30 seconds, classify and update LED
+    if (sample_count >= 30) {
+        float features[NUM_FEATURES];   // NUM_FEATURES = 118
+        extract_features(imu_buffer, features);
+
+        int stage = predict_sleep_stage(features);
+
+        print_sleep_stage(stage);
+        blink_stage(stage);
+
+        sample_count = 0;   // Reset buffer
+    }
+
+    delay(1000);   // 1 Hz IMU sampling
+}
+\end{ccode}
+
+
+\section{Arduino Firmware --- Feature Extraction}
+\label{app:feature_c}
+
+\begin{ccode}
+// Extracts IMU statistics from a 30-sample buffer and writes them
+// into the feature vector at the indices defined in features_audio.h.
+void extract_imu_features(float buf[30][6], float f[NUM_FEATURES]) {
+
+    // --- Axis-wise statistics (mean, std, max, min) ---
+    for (int axis = 0; axis < 6; axis++) {
+        f[axis * 4 + 0] = compute_mean(buf, axis);
+        f[axis * 4 + 1] = compute_std(buf,  axis);
+        f[axis * 4 + 2] = compute_max(buf,  axis);
+        f[axis * 4 + 3] = compute_min(buf,  axis);
+    }
+
+    // --- Orientation-invariant acceleration magnitude ---
+    float acc_mag[30];
+    for (int i = 0; i < 30; i++) {
+        acc_mag[i] = sqrtf(
+            buf[i][0] * buf[i][0] +
+            buf[i][1] * buf[i][1] +
+            buf[i][2] * buf[i][2]
+        );
+    }
+    f[FEAT_ACC_MAG]     = compute_mean_array(acc_mag, 30);
+    f[FEAT_ACC_MAG_STD] = compute_std_array(acc_mag,  30);
+
+    // ... (remaining features follow the same pattern)
+}
+
+float compute_mean(float buf[30][6], int axis) {
+    float sum = 0.0f;
+    for (int i = 0; i < 30; i++) sum += buf[i][axis];
+    return sum / 30.0f;
+}
+\end{ccode}
+
+
+\section{Arduino Firmware --- LED Feedback}
+\label{app:led}
+
+\begin{ccode}
+// Helper: sets the three RGB channels simultaneously.
+// The XIAO nRF52840 Sense RGB LED is active-low: LOW = on, HIGH = off.
+static inline void set_rgb(bool r, bool g, bool b) {
+    digitalWrite(LEDR, r ? LOW : HIGH);
+    digitalWrite(LEDG, g ? LOW : HIGH);
+    digitalWrite(LEDB, b ? LOW : HIGH);
+}
+
+// Updates the onboard RGB LED to reflect the classified sleep stage.
+// Wake = Red  |  NREM = Green  |  REM = Blue
+void blink_stage(int sleep_stage) {
+    if      (sleep_stage == 0) set_rgb(true,  false, false);  // Red   -- Wake
+    else if (sleep_stage == 1) set_rgb(false, true,  false);  // Green -- NREM
+    else                       set_rgb(false, false, true );  // Blue  -- REM
+
+    delay(1500);
+    set_rgb(false, false, false);   // off between epochs
+}
+\end{ccode}
+
+
+\section{Performance Optimisation}
+\label{app:optimisation}
+
+\begin{ccode}
+// --- Single-precision float with hardware FPU ---
+// The Cortex-M4F executes float32 arithmetic natively in one cycle.
+// No fixed-point conversion is required or used.
+float acc_mag = sqrtf(ax*ax + ay*ay + az*az);   // FPU sqrtf
+
+// --- Streaming audio accumulator ---
+// A single 256-sample PDM window is held in memory at a time.
+// Running sums accumulate epoch-level statistics without storing
+// the full 30-second waveform (~480 KB at 16 kHz).
+
+typedef struct {
+    double energy_sum;     // sum of per-window RMS values
+    double energy_sq_sum;  // sum of squared RMS (for std)
+    int    window_count;   // number of windows processed
+    // ... additional spectral and snoring accumulators
+} AudioAccum;
+
+void accum_audio_window(AudioAccum *a, float rms) {
+    a->energy_sum    += rms;
+    a->energy_sq_sum += rms * rms;
+    a->window_count  += 1;
+}
+
+// --- Online patient baseline (O(1) per epoch) ---
+// Patient-specific normalisation does not require a startup snapshot.
+// A running mean is updated after every completed epoch, converging
+// to the true individual mean as the session progresses.
+
+pat.acc_sum  += acc_mag;
+pat.n_epochs += 1;
+double p_acc_mean = pat.acc_sum / pat.n_epochs;   // exact running mean
+\end{ccode}
+
+
+\section{Unit Testing}
+\label{app:testing}
+
+\begin{ccode}
+// Unit test: verifies feature extraction against a known synthetic input.
+// Input: constant acceleration of 1.0g along x-axis, all other axes zero.
+// Expected: mean(ax) == 1.0 (FEAT_AX_MEAN, index 0).
+
+void test_feature_extraction() {
+    float test_buffer[30][6];
+
+    for (int i = 0; i < 30; i++) {
+        test_buffer[i][0] = 1.0f;   // ax = 1g
+        test_buffer[i][1] = 0.0f;
+        test_buffer[i][2] = 0.0f;
+        test_buffer[i][3] = 0.0f;
+        test_buffer[i][4] = 0.0f;
+        test_buffer[i][5] = 0.0f;
+    }
+
+    float features[NUM_FEATURES];
+    extract_imu_features(test_buffer, features);
+
+    if (fabsf(features[FEAT_AX_MEAN] - 1.0f) < 0.01f) {
+        Serial.println("PASS: mean(ax) == 1.0");
+    } else {
+        Serial.print("FAIL: mean(ax) = ");
+        Serial.println(features[FEAT_AX_MEAN]);
+    }
+}
+\end{ccode}

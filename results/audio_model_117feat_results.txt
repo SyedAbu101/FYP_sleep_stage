@@ -1,0 +1,77 @@
+======================================================================
+117-Feature Audio-Enhanced XGBoost Model — Full Results
+IMU (97) + Top 20 Audio Features  |  n_estimators=20  |  max_depth=6  |  lr=0.1
+5-fold patient-level GroupKFold CV with class-balanced sample weights
+======================================================================
+
+DATASET
+  Total epochs   : 6,427
+  Total features : 118  (98 IMU + 20 audio)
+  Patients       : 44
+  Wake epochs    : 2,285
+  NREM epochs    : 3,166
+  REM epochs     : 976
+
+TOP 20 AUDIO FEATURES USED
+   1. spectral_centroid_normalized                   importance=0.00879
+   2. crest_variability                              importance=0.00843
+   3. spectral_stability                             importance=0.00823
+   4. energy_rolling_std                             importance=0.00794
+   5. activity_variability                           importance=0.00725
+   6. energy_rolling_mean                            importance=0.00643
+   7. snoring_normalized                             importance=0.00626
+   8. snoring_variability                            importance=0.00611
+   9. breathing_stability                            importance=0.00570
+  10. spectral_richness                              importance=0.00555
+  11. silence_ratio                                  importance=0.00498
+  12. zcr_mean                                       importance=0.00490
+  13. energy_std                                     importance=0.00488
+  14. snoring_power                                  importance=0.00464
+  15. snoring_percentile                             importance=0.00453
+  16. energy_peak_ratio                              importance=0.00447
+  17. energy_max                                     importance=0.00444
+  18. breathing_rate_variability                     importance=0.00439
+  19. crest_factor                                   importance=0.00428
+  20. rms_energy                                     importance=0.00424
+
+PER-FOLD RESULTS
+  Fold  Train Pts  Test Pts  n_train  n_test    Kappa   Accuracy  F1-Macro
+  --------------------------------------------------------------------
+     1  ['P009', 'P012', 'P013', 'P015', 'P016', 'P017', 'P018', 'P019', 'P020', 'P021', 'P022', 'P024', 'P025', 'P028', 'P029', 'P030', 'P032', 'P033', 'P034', 'P035', 'P039', 'P040', 'P041', 'P043', 'P044', 'P045', 'P046', 'P048', 'P049', 'P050', 'P051', 'P052', 'P053', 'P054', 'P055']  ['P014', 'P023', 'P026', 'P031', 'P036', 'P037', 'P038', 'P042', 'P047']    5,167   1,260   0.2710     56.98%    0.4643
+     2  ['P009', 'P013', 'P014', 'P015', 'P018', 'P019', 'P020', 'P021', 'P022', 'P023', 'P024', 'P025', 'P026', 'P028', 'P029', 'P030', 'P031', 'P032', 'P034', 'P035', 'P036', 'P037', 'P038', 'P039', 'P042', 'P043', 'P044', 'P045', 'P047', 'P048', 'P049', 'P050', 'P051', 'P053', 'P054']  ['P012', 'P016', 'P017', 'P033', 'P040', 'P041', 'P046', 'P052', 'P055']    5,112   1,315   0.2603     52.62%    0.4990
+     3  ['P012', 'P013', 'P014', 'P015', 'P016', 'P017', 'P018', 'P019', 'P021', 'P022', 'P023', 'P024', 'P026', 'P028', 'P029', 'P030', 'P031', 'P033', 'P035', 'P036', 'P037', 'P038', 'P039', 'P040', 'P041', 'P042', 'P043', 'P044', 'P045', 'P046', 'P047', 'P050', 'P052', 'P053', 'P054', 'P055']  ['P009', 'P020', 'P025', 'P032', 'P034', 'P048', 'P049', 'P051']    5,182   1,245   0.2789     54.86%    0.5110
+     4  ['P009', 'P012', 'P013', 'P014', 'P015', 'P016', 'P017', 'P018', 'P020', 'P021', 'P023', 'P024', 'P025', 'P026', 'P028', 'P029', 'P031', 'P032', 'P033', 'P034', 'P035', 'P036', 'P037', 'P038', 'P039', 'P040', 'P041', 'P042', 'P046', 'P047', 'P048', 'P049', 'P051', 'P052', 'P055']  ['P019', 'P022', 'P030', 'P043', 'P044', 'P045', 'P050', 'P053', 'P054']    5,125   1,302   0.3884     64.06%    0.5857
+     5  ['P009', 'P012', 'P014', 'P016', 'P017', 'P019', 'P020', 'P022', 'P023', 'P025', 'P026', 'P030', 'P031', 'P032', 'P033', 'P034', 'P036', 'P037', 'P038', 'P040', 'P041', 'P042', 'P043', 'P044', 'P045', 'P046', 'P047', 'P048', 'P049', 'P050', 'P051', 'P052', 'P053', 'P054', 'P055']  ['P013', 'P015', 'P018', 'P021', 'P024', 'P028', 'P029', 'P035', 'P039']    5,122   1,305   0.4185     62.91%    0.5925
+  --------------------------------------------------------------------
+  Mean                                         0.3234     58.29%    0.5305
+   Std                                         0.0741      5.00%    0.0562
+
+CLASSIFICATION REPORT (concatenated CV predictions)
+              precision    recall  f1-score   support
+
+        Wake      0.611     0.666     0.637      2285
+        NREM      0.669     0.578     0.620      3166
+         REM      0.331     0.406     0.364       976
+
+    accuracy                          0.583      6427
+   macro avg      0.537     0.550     0.540      6427
+weighted avg      0.597     0.583     0.587      6427
+
+CONFUSION MATRIX (rows=true label, cols=predicted label)
+                  Pred:Wake  Pred:NREM  Pred:REM
+  True:Wake        1,521        552       212
+  True:NREM          745      1,831       590
+  True:REM           225        355       396
+
+PER-CLASS TOTALS
+  Wake: 1,521 / 2,285 correct  (66.6% recall)
+  NREM: 1,831 / 3,166 correct  (57.8% recall)
+  REM : 396 / 976 correct  (40.6% recall)
+
+MODEL HYPERPARAMETERS
+  n_estimators : 20   (reduced from 100 for nRF52840 1 MB flash constraint)
+  max_depth    : 6
+  learning_rate: 0.1
+  objective    : multi:softmax (3-class)
+  class_weight : balanced (computed per fold)
+  scaler       : StandardScaler (fit on train split per fold)

@@ -345,7 +345,7 @@ python hardware/model_export/export_audio_to_c.py
 
 ## Contact
 
-**Author:** [Your Name]  
+**Author:** F Syed Abu Thahir  
 **Institution:** Nanyang Technological University (NTU)  
 **Course:** Computer Science Final Year Project 2024/2025  
 
